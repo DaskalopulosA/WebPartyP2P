@@ -1,90 +1,136 @@
-# Signal Sprint — static WebRTC party-game POC
+# WebParty P2P — static browser minigames
 
-Signal Sprint is a deliberately tiny multiplayer button race. Players join the
-same room, race to 25 taps, see each other's scores update in real time, and can
-start a synchronized new round.
+WebParty P2P is a small proof that realtime multiplayer browser games can live
+entirely on GitHub Pages. GitHub serves static HTML, CSS, and JavaScript;
+browsers discover one another through Trystero and exchange game traffic over
+encrypted WebRTC DataChannels.
 
-The important part is not the game: the production application is only static
-HTML, CSS, and JavaScript. GitHub Pages serves those files, while browsers send
-game events directly to one another over encrypted WebRTC DataChannels.
+There is no application server, database, serverless function, account system,
+secret, API key, or paid service operated by this project.
 
-Expected Pages URL:
+Play the deployed build:
 [`https://daskalopulosa.github.io/WebPartyP2P/`](https://daskalopulosa.github.io/WebPartyP2P/)
+
+## Games
+
+### Cloud Hop
+
+Cloud Hop is an original vertical platform race designed for both desktop and
+mobile browsers. Bouncing is automatic; players steer left and right to climb a
+room-seeded course and race to the 1,500m beacon.
+
+- Desktop: arrow keys or `A` / `D`
+- Phone or tablet: hold the large left/right controls, or hold either half of
+  the game canvas
+- Multiplayer: remote positions, best heights, falls, round resets, and finish
+  events travel between browsers; nearby rivals are drawn as live ghosts and
+  distant rivals appear as edge markers
+
+The local browser owns its physics, so input stays responsive even if the
+network jitters. A compact position update is broadcast at most every 80ms.
+
+### Signal Sprint
+
+The original connectivity demo remains available: race to 25 clicks, taps, or
+space-bar presses. Score updates and new rounds synchronize between peers.
 
 ## What this proves
 
-- A multiplayer browser game can be built and hosted as static files.
-- There is no application server, database, serverless function, account
-  system, secret, or API key.
-- A room can be shared as a short code or a URL such as
-  `https://daskalopulosa.github.io/WebPartyP2P/?room=ABC123`.
-- Each page load gets a random Trystero peer ID, so every tab is an independent
-  player. IP addresses are never used as application identity.
-- Connected players, peer IDs, room ID, discovery state, transport, and recent
-  network events are visible in the diagnostics panel.
+- A multiplayer game shelf can be built and hosted as static files.
+- A share URL carries both the game and room, for example
+  `https://daskalopulosa.github.io/WebPartyP2P/?game=cloud-hop&room=ABC123`.
+- Every page load gets a random Trystero peer ID, so each tab is an independent
+  player. IP addresses are not application identity.
+- One reusable room layer can support games with very different state and input
+  needs without putting game rules in networking code.
+- Room ID, game protocol, local and remote peer IDs, discovery status, WebRTC
+  state, and useful low-frequency events remain visible while playing.
 
 ## Architecture
 
 ```text
-GitHub Pages                 Public Nostr relays
-serves static files          exchange encrypted SDP/ICE handshakes
-       │                                  │
-       ▼                                  ▼
-  Browser A  ═════ encrypted WebRTC DataChannel ═════  Browser B
-             presence, score, snapshot, round-reset events
+GitHub Pages                     Public Nostr relays
+serves static files              exchange encrypted SDP/ICE handshakes
+       │                                      │
+       ▼                                      ▼
+  Browser A  ═══════ encrypted WebRTC DataChannel ═══════  Browser B
+             presence + namespaced minigame events
 ```
 
-The source is intentionally split at one boundary:
+The code has four intentionally small layers:
 
-- `src/network.js` owns peer discovery, Trystero rooms, WebRTC peer lifecycle,
-  event transport, and network diagnostics.
-- `src/main.js` owns room URLs, players, scores, round reconciliation, and the
-  interface. It only sees small named JSON events.
+- `src/network.js` owns Trystero rooms, discovery, raw JSON event transport,
+  peer lifecycle, and relay/WebRTC diagnostics.
+- `src/session.js` owns shared room membership, player identity, presence,
+  roster catch-up, and game-message namespacing. It has no game rules.
+- `src/games/` owns the catalog and one module per minigame. A game owns its DOM
+  or canvas, controls, rules, reconciliation, and cleanup.
+- `src/main.js` owns the game shelf, room URL, common arena shell, invite link,
+  and debugging panel.
 
-This is separation for a future game layer, not an attempted framework.
+Each game is lazy-loaded, so adding games does not turn the first page into one
+large bundle.
 
-### Shared state
+### Minigame contract
 
-Each player owns a monotonically increasing score. Remote peers keep the
-largest score they have seen for each peer, making duplicated or reordered
-messages harmless. When a peer connects, existing peers send a snapshot so the
-new arrival catches up. New rounds use a `(version, peerId)` tuple so
-simultaneous reset messages settle on the same round without a server clock.
+Add one catalog entry in `src/games/catalog.js`:
 
-There is deliberately no authoritative host and no persistence. When every tab
-leaves, the room state disappears.
+```js
+{
+  id: 'my-game',
+  title: 'My Game',
+  description: 'One useful sentence.',
+  controls: 'How to play',
+  load: () => import('./my-game.js')
+}
+```
 
-## Discovery and signaling
+The module exports one mount function:
 
-The app uses Trystero's default **Nostr strategy**. On joining a room, Trystero
-connects to a small redundant selection from its built-in list of public Nostr
-relays. Those relays are third-party public infrastructure; this project does
+```js
+export function mountGame(root, {session, addLog}) {
+  // Render into root and subscribe to session events.
+  return {
+    onSessionChange() {},
+    destroy() {}
+  }
+}
+```
+
+The useful session surface is deliberately narrow:
+
+- `session.selfPlayer`, `session.roomId`, and `session.gameId`
+- `session.getPlayers()` and `session.getConnectedPeerIds()`
+- `session.sendGame(type, data, optionalTarget, options)`
+- `session.onGameEvent(listener)` and `session.onPeerEvent(listener)`
+
+Use `{frequent: true}` for high-rate ephemeral updates; the common debug log
+keeps those quiet so diagnostics remain readable. This is a practical extension
+seam, not a complete framework: common concepts should only move into the
+session layer after another real game proves they are shared.
+
+## Discovery, signaling, and P2P traffic
+
+The app uses Trystero's default **Nostr strategy**. When joining a room,
+Trystero connects to a redundant selection from its built-in public Nostr relay
+list. Those third-party relays help peers find one another and exchange
+encrypted WebRTC session descriptions and ICE candidates. This repository does
 not deploy or administer them.
 
-The relays only help browsers find each other and exchange WebRTC session
-descriptions and ICE candidates. Trystero encrypts that handshake material with
-a key derived from the public app ID and room ID. A room code is therefore a
-namespace and convenience, **not** strong access control.
+After peers connect, application events use encrypted WebRTC DataChannels and
+do not pass through Nostr. These include:
 
-WebRTC then uses ICE and public STUN services selected by Trystero to attempt a
-direct connection through NAT. No TURN relay is configured, because a TURN
-service would relay game traffic and weaken the zero-infrastructure proof.
+- player presence and roster snapshots
+- Signal Sprint scores and round resets
+- Cloud Hop positions, heights, falls, state snapshots, finishes, and new skies
 
-## What traffic is actually peer-to-peer?
+Static assets still come from GitHub Pages. Nostr still carries discovery and
+signaling. Public STUN services selected by Trystero help browsers determine
+reachable routes. No TURN service is configured, so game traffic is not relayed
+through infrastructure operated for this app.
 
-After connection, these application events travel browser-to-browser through
-WebRTC DataChannels and do not pass through Nostr:
-
-- player presence and nickname
-- score updates
-- catch-up snapshots
-- new-round events
-
-They are encrypted in transit by WebRTC (DTLS). Static assets still come from
-GitHub Pages; Nostr relays still carry discovery/signaling; STUN servers help
-determine reachable network addresses. As with WebRTC generally, connected
-peers and some discovery/ICE infrastructure may learn network address
-information. The app does not read an IP address or use one as player identity.
+A room code is a shared namespace and convenience, not strong access control.
+Do not use this proof of concept for sensitive data.
 
 ## Run locally
 
@@ -101,99 +147,98 @@ Open the exact URL Vite prints, normally:
 http://localhost:5173/WebPartyP2P/
 ```
 
-`localhost` is treated as a secure browser context, so it is suitable for this
-WebRTC POC. To check the exact production output locally:
+`localhost` is a secure browser context and is suitable for WebRTC. To check
+the exact production output:
 
 ```bash
 pnpm build
 pnpm preview
 ```
 
-The production bundle is written to `dist/` and contains static files only.
+The `dist/` directory contains static files only.
 
 ## Test with two browser tabs
 
-1. Open the local or deployed site and select **Create a fresh room**.
-2. Select **Copy invite link**.
-3. Paste the link into a second tab or private window.
-4. Wait until both tabs say **2 players connected**. Discovery commonly takes
+1. Open the local or deployed site.
+2. Choose **Cloud Hop** and select **Create a Cloud Hop room**.
+3. Select **Copy invite link** and open it in another tab or private window.
+4. Wait for both tabs to say **2 players connected**. Discovery commonly takes
    a few seconds.
-5. Tap **Mash it** in either tab. The same score should appear quickly in both.
-6. Select **New round** in one tab. Both scoreboards should reset.
-7. Compare the diagnostics: each tab has a different peer ID and lists the
-   other tab as a remote peer.
+5. Move in both tabs. When the players are at similar heights, each browser
+   should draw the other player's colored ghost. The live leaderboard should
+   update even when they are far apart.
+6. Select **New sky** in one tab. Both players should restart on the same new
+   course.
+7. Return to **Games**, choose **Signal Sprint**, create a room, and verify that
+   score and round events still synchronize.
 
-If testing repeatedly, use a new room code or fully close old tabs so stale
-peers are not confused with the current test.
+The diagnostics should show a different local peer ID in every tab and list the
+other tab as a remote peer.
 
 ## Test across two devices
 
-The most reliable test is the deployed HTTPS site:
+Use the deployed HTTPS page for the cleanest test:
 
-1. Create a room on the first device.
-2. Send the invite URL to the second device.
-3. Open it in a current Chromium, Firefox, or Safari browser.
-4. Wait for both devices to show **P2P connected**, then race.
-5. For a stronger NAT test, put one device on Wi-Fi and the other on cellular.
+1. Create a room on the first device and send the invite URL to the second.
+2. Open it in a current Chrome, Edge, Firefox, or Safari browser.
+3. Wait for both devices to show **P2P connected**.
+4. On desktop, use the keyboard. On mobile, use the large touch controls.
+5. For a stronger NAT test, place one device on Wi-Fi and the other on cellular.
 
-A development server exposed to the LAN can also serve the page, but browsers
-may restrict some APIs on a non-HTTPS LAN origin. GitHub Pages avoids that
-variable.
+A Vite server exposed to the LAN can also serve the page, but some browsers
+restrict APIs on non-HTTPS LAN origins. GitHub Pages avoids that variable.
 
 ## Deploy to GitHub Pages
 
 The workflow in `.github/workflows/deploy.yml` installs dependencies, runs the
-production build, uploads only `dist/`, and deploys it using GitHub's official
+production build, uploads only `dist/`, and deploys it with GitHub's official
 Pages actions whenever `main` changes. It needs no repository secrets.
 
 One-time repository setting:
 
 1. Open **Settings → Pages** in the GitHub repository.
 2. Under **Build and deployment**, set **Source** to **GitHub Actions**.
-3. Push to `main`, or run **Deploy static site to GitHub Pages** manually from
-   the Actions tab.
+3. Push to `main`, or manually run **Deploy static site to GitHub Pages**.
 
-GitHub Pages is free for a public repository. Vite's base path is fixed to
-`/WebPartyP2P/`, matching this repository name.
+Vite's base path is `/WebPartyP2P/`, matching the repository name.
 
-## Known WebRTC and NAT limitations
+## Known WebRTC and game limitations
 
-- There is no TURN fallback. Peers behind symmetric NAT, strict carrier-grade
-  NAT, enterprise firewalls, VPN policies, or networks that block UDP/WebRTC
-  may fail to connect. The diagnostics will remain in discovery or report a
-  join error.
+- There is no TURN fallback. Symmetric NAT, strict carrier-grade NAT,
+  enterprise firewalls, VPN policies, or blocked UDP/WebRTC can prevent a
+  connection.
 - Public Nostr relays can be unavailable, rate-limited, blocked, or change
-  behavior. Trystero uses redundant relays, but this is still an external
-  availability dependency.
-- A short room code is discoverable and is not authentication. Anyone who knows
-  it can attempt to join. Do not send sensitive data in this POC.
-- State is ephemeral and peer-reconciled. There is no late-join history after
-  all existing peers leave, host authority, moderation, or anti-cheat.
-- Every player connects to every other player, so the mesh is appropriate for a
-  small party room, not a large audience.
-- Background-tab throttling and mobile sleep can delay events or disconnect a
-  peer.
+  behavior. Redundancy helps but does not remove that dependency.
+- Peers form a full mesh. This suits a small party, not a large audience.
+- State is ephemeral. When every tab leaves, the room disappears.
+- Cloud Hop intentionally trusts each browser's physics and wall clock. There
+  is no authoritative host, anti-cheat, lag compensation, or clock
+  synchronization. Near-simultaneous finishes may be ordered imperfectly.
+- Background-tab throttling and mobile sleep can delay updates or disconnect a
+  player.
+- WebRTC and its discovery/ICE infrastructure can expose network address
+  information to connected peers or infrastructure. The app does not read or
+  use an IP address as player identity.
 
 ## Sensible next steps
 
-1. Measure connection success and latency across several home, mobile, and
-   corporate networks before choosing this architecture for a real game.
-2. Define a small versioned game protocol around the existing network boundary.
-3. Add optional room passwords for stronger signaling encryption and admission
-   knowledge, while keeping in mind that shared links can still leak them.
-4. Decide whether broader connectivity justifies an optional TURN service and
-   its cost/operations trade-off.
-5. Add host election, reconnect handling, and game-specific validation only
-   when a real minigame requires them.
-6. Add automated multi-browser tests for room join, score convergence, reset,
-   and disconnect/reconnect behavior.
+1. Playtest Cloud Hop on iOS Safari, Android Chrome, and desktop browsers, then
+   tune platform spacing and movement constants from actual device feel.
+2. Add a tiny automated contract test for every catalog game: mount, receive an
+   event, react to a peer, and destroy cleanly.
+3. Measure connection success and latency across home, mobile, and corporate
+   networks before committing to a no-TURN product architecture.
+4. Add reconnect handling and an optional elected host only when a game truly
+   needs authority.
+5. Extract shared round reconciliation or input helpers only after a third game
+   demonstrates the same need.
 
-## Dependency choices
+## Dependencies
 
-- [Trystero](https://github.com/dmotz/trystero) provides peer discovery and a
+- [Trystero](https://github.com/dmotz/trystero) provides peer discovery and its
   small WebRTC room/action API.
-- [Vite](https://vite.dev/) bundles the browser modules into static production
-  files. It is a build tool only and is not present as a deployed server.
+- [Vite](https://vite.dev/) bundles browser modules into static production
+  files. It is a build tool and is not a deployed server.
 
-No runtime analytics, fonts, CDNs, paid services, credentials, or operator-run
-infrastructure are used.
+No runtime analytics, web fonts, asset CDNs, paid services, credentials, or
+operator-run backend infrastructure are used.
